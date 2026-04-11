@@ -5,6 +5,7 @@ Overcooked ortamında insanın niyetini Bayes kuralıyla tahmin eden AI agent.
 """
 
 import numpy as np
+import random
 from overcooked_ai_py.agents.agent import Agent
 from overcooked_ai_py.mdp.actions import Action, Direction
 from overcooked_ai_py.planning.planners import (
@@ -200,6 +201,7 @@ class BeliefAgentV2(Agent):
         self._mlam = None         # MediumLevelActionManager
         self._intent_mask = np.ones(NUM_INTENTS)  # layout'a göre 0/1 maske
         self._display = None
+        self._last_action = None  # tıkanma tespiti için
         if DISPLAY_AVAILABLE:
             self._display = BeliefDisplay(INTENTS)
 
@@ -208,6 +210,7 @@ class BeliefAgentV2(Agent):
         self.prev_state = None
         self.belief = np.ones(NUM_INTENTS) / NUM_INTENTS  # uniform başlangıç
         self._posterior = self.belief.copy()  # karar için kullanılan posterior
+        self._last_action = None
 
     def set_mdp(self, mdp, initial_state=None):
         """
@@ -271,7 +274,32 @@ class BeliefAgentV2(Agent):
                 self._display.update(self.belief, "B'(X_{n+1}) predicted", "predicted")
 
         result = self._decide(state)
+
+        # Tıkanma tespiti
+        result = self._unstuck(state, result)
+
+        self._last_action = result[0]
         self.prev_state = state
+        return result
+
+    def _unstuck(self, state, result):
+        """
+        Tıkanma tespiti ve çözümü.
+        Önceki turda hareket aksiyonu verdik ama pozisyon değişmediyse
+        → komşu yürünebilir karelerden rastgele birine git.
+        """
+        ai = state.players[self.agent_index]
+        if (self._last_action in Direction.ALL_DIRECTIONS
+                and self.prev_state is not None
+                and self.prev_state.players[self.agent_index].position == ai.position):
+            walkable = set(self.mdp.get_valid_player_positions())
+            valid = []
+            for d in Direction.ALL_DIRECTIONS:
+                new_pos = Action.move_in_direction(ai.position, d)
+                if new_pos in walkable:
+                    valid.append(d)
+            if valid:
+                return (random.choice(valid), {})
         return result
 
     def _decide(self, state):
