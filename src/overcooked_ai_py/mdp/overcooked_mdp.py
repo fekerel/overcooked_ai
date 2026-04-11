@@ -1693,10 +1693,10 @@ class OvercookedGridworld(object):
         for obj in state.objects.values():
             if obj.name == "soup":
                 # automatically starts cooking when the pot has 3 ingredients
-                if self.old_dynamics and (
+                if (
                     not obj.is_cooking
                     and not obj.is_ready
-                    and len(obj.ingredients) == 3
+                    and len(obj.ingredients) == Recipe.MAX_NUM_INGREDIENTS
                 ):
                     obj.begin_cooking()
                 if obj.is_cooking:

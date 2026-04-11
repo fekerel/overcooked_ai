@@ -14,19 +14,24 @@
 
 
 import sys
+import os
 import pygame
 from pygame.locals import *
 
 from overcooked_ai_py.mdp.overcooked_mdp import OvercookedGridworld
 from overcooked_ai_py.mdp.overcooked_env import OvercookedEnv
 from overcooked_ai_py.mdp.actions import Action, Direction
-from overcooked_ai_py.agents.rule_based_agent import RuleBasedAgent
 from overcooked_ai_py.planning.planners import MediumLevelActionManager, NO_COUNTERS_PARAMS
 from overcooked_ai_py.visualization.state_visualizer import StateVisualizer
 
+# BeliefAgent import: workspace root'tan
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from belief_agent_v2 import BeliefAgentV2 as BeliefAgent
+from order_display import render_orders
+
 
 # --- AYARLAR ---
-LAYOUT = "five_by_five"       # Harita ismi
+LAYOUT = "inverse_marshmallow_experiment"       # Harita ismi
 HORIZON = 400                 # Maksimum adim sayisi
 WINDOW_SCALE = 3              # Pencere buyukluk (1=kucuk, 3=buyuk)
 FPS = 30                      # Pencere FPS
@@ -46,16 +51,27 @@ KEY_ACTION_MAP = {
 }
 
 
-def render_to_window(vis, state, grid, window, score, timestep, turn_info):
+def render_to_window(vis, state, grid, window, score, timestep, turn_info, orders=None):
     hud_data = {
         "timestep": timestep,
         "score": score,
         "turn": turn_info,
     }
 
-    surface = vis.render_state(state, grid, hud_data=hud_data)
+    game_surface = vis.render_state(state, grid, hud_data=hud_data)
+    win_w, win_h = window.get_size()
 
-    scaled = pygame.transform.scale(surface, window.get_size())
+    if orders:
+        # Sipariş panelini oyunun altına ekle
+        order_panel = render_orders(orders, game_surface.get_width())
+        panel_h = order_panel.get_height()
+        combined = pygame.Surface((game_surface.get_width(), game_surface.get_height() + panel_h))
+        combined.blit(game_surface, (0, 0))
+        combined.blit(order_panel, (0, game_surface.get_height()))
+        scaled = pygame.transform.scale(combined, (win_w, win_h))
+    else:
+        scaled = pygame.transform.scale(game_surface, (win_w, win_h))
+
     window.blit(scaled, (0, 0))
     pygame.display.flip()
 
@@ -75,16 +91,29 @@ def get_player_action(events):
 
 def main():
     print(f"Harita yukleniyor: {LAYOUT}")
-    mdp = OvercookedGridworld.from_layout_name(LAYOUT)
+    # Layout'a göre geçerli siparişleri belirle
+    layout_orders = []
+    # Geçici MDP oluştur (ingredient varlığını kontrol etmek için)
+    _tmp_mdp = OvercookedGridworld.from_layout_name(LAYOUT)
+    if _tmp_mdp.get_onion_dispenser_locations():
+        layout_orders.append({"ingredients": ("onion", "onion", "onion")})
+    if _tmp_mdp.get_tomato_dispenser_locations():
+        layout_orders.append({"ingredients": ("tomato", "tomato", "tomato")})
+    if not layout_orders:
+        # Hiçbiri yoksa fallback (olmaması lazım ama güvenlik)
+        layout_orders.append({"ingredients": ("onion", "onion", "onion")})
+
+    mdp = OvercookedGridworld.from_layout_name(
+        LAYOUT,
+        start_all_orders=layout_orders,
+    )
     env = OvercookedEnv.from_mdp(mdp, horizon=HORIZON, info_level=0)
 
     print("AI agent hazirlaniyor (yol hesaplaniyor)...")
-    mlam = MediumLevelActionManager.from_pickle_or_compute(
-        mdp, NO_COUNTERS_PARAMS, force_compute=True
-    )
-    ai_agent = RuleBasedAgent(mlam)
+    ai_agent = BeliefAgent()
+    ai_agent.reset()
     ai_agent.set_agent_index(1)
-    ai_agent.set_mdp(mdp)
+    ai_agent.set_mdp(mdp, initial_state=env.state)
     print("Hazir.")
 
     # Gorsellestirici
@@ -93,19 +122,31 @@ def main():
 
     test_surface = vis.render_state(env.state, grid)
     base_w, base_h = test_surface.get_size()
-    win_w = base_w * WINDOW_SCALE
-    win_h = base_h * WINDOW_SCALE
+
+    # Sipariş paneli yüksekliğini de hesaba kat
+    orders = env.state.all_orders
+    if orders:
+        test_order_panel = render_orders(orders, base_w)
+        base_h += test_order_panel.get_height()
 
     pygame.init()
+    # Ekrana sığacak şekilde otomatik ölçekle
+    screen_info = pygame.display.Info()
+    max_w = int(screen_info.current_w * 0.80)
+    max_h = int(screen_info.current_h * 0.80)
+    auto_scale = min(max_w / base_w, max_h / base_h, WINDOW_SCALE)
+    win_w = int(base_w * auto_scale)
+    win_h = int(base_h * auto_scale)
+
     window = pygame.display.set_mode((win_w, win_h), HWSURFACE | DOUBLEBUF | RESIZABLE)
     pygame.display.set_caption(f"Overcooked Turn-Based - {LAYOUT}")
     clock = pygame.time.Clock()
 
     score = 0
-    turn = "INSAN" 
+    turn = "INSAN"
 
     # Baslangic ekranini goster
-    render_to_window(vis, env.state, grid, window, score, env.state.timestep, "SENIN SIRAN (WASD + SPACE)")
+    render_to_window(vis, env.state, grid, window, score, env.state.timestep, "SENIN SIRAN (WASD + SPACE)", orders)
 
     print("\n=== OYUN BASLADI ===")
     print("WASD = hareket, SPACE = etkilesim, Q = bekle, ESC = cik")
@@ -116,7 +157,7 @@ def main():
         # ADIM 1: INSAN OYUNCUNUN SIRASI
 
         turn = "SENIN SIRAN (WASD + SPACE)"
-        render_to_window(vis, env.state, grid, window, score, env.state.timestep, turn)
+        render_to_window(vis, env.state, grid, window, score, env.state.timestep, turn, orders)
 
         # İnsan aksiyonunu bekle
         human_action = None
@@ -133,7 +174,7 @@ def main():
                     window = pygame.display.set_mode(
                         event.dict["size"], HWSURFACE | DOUBLEBUF | RESIZABLE
                     )
-                    render_to_window(vis, env.state, grid, window, score, env.state.timestep, turn)
+                    render_to_window(vis, env.state, grid, window, score, env.state.timestep, turn, orders)
 
         if not running:
             break
@@ -146,7 +187,7 @@ def main():
             print(f"  +{reward} ODUL! (insan hareketi sonrasi)")
 
         # Gorseli guncelle
-        render_to_window(vis, state, grid, window, score, state.timestep, "AI DUSUNUYOR...")
+        render_to_window(vis, state, grid, window, score, state.timestep, "AI DUSUNUYOR...", orders)
 
         if env.is_done():
             break
@@ -162,7 +203,7 @@ def main():
             print(f"  +{reward} ODUL! (AI hareketi sonrasi)")
 
         # Gorseli guncelle
-        render_to_window(vis, state, grid, window, score, state.timestep, "SENIN SIRAN (WASD + SPACE)")
+        render_to_window(vis, state, grid, window, score, state.timestep, "SENIN SIRAN (WASD + SPACE)", orders)
 
     print(f"\n=== OYUN BITTI ===")
     print(f"Toplam adim: {env.state.timestep}")
