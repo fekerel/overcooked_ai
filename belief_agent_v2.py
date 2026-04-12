@@ -351,6 +351,7 @@ class BeliefAgentV2(Agent):
         """
         Eli boş AI: posterior'a ve pot durumuna bakarak ne alacağını seç.
 
+        0. Counter'da soup varsa → al ve servis et
         1. Tüm potlar dolu (cooking/ready) → tabak al
         2. Eksik pot var, ingredient < 2  → pot'a uyumlu ingredient al
         3. Eksik pot var, ingredient == 2 → insanın intent'ine bak:
@@ -358,6 +359,18 @@ class BeliefAgentV2(Agent):
            - Değilse → ingredient al
         Fallback: STAY
         """
+        # Adım 0: Counter'da soup varsa → al (sonraki turda Katman 1 servis eder)
+        soup_counters = []
+        for pos in self.mdp.get_counter_locations():
+            if state.has_object(pos):
+                obj = state.get_object(pos)
+                if obj.name == "soup":
+                    soup_counters.append(pos)
+        if soup_counters:
+            result = self._go(state, soup_counters)
+            if result is not None:
+                return result
+
         MAX = Recipe.MAX_NUM_INGREDIENTS
 
         # Pot analizi: en dolu eksik pot'u bul

@@ -31,7 +31,10 @@ from order_display import render_orders
 
 
 # --- AYARLAR ---
-LAYOUT = "forced_coordination_tomato"       # Harita ismi
+DEFAULT_LAYOUT = "forced_coordination_tomato"       # Varsayılan harita ismi
+LAYOUT = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_LAYOUT
+if LAYOUT.endswith(".layout"):
+    LAYOUT = LAYOUT[:-len(".layout")]
 HORIZON = 400                 # Maksimum adim sayisi
 WINDOW_SCALE = 3              # Pencere buyukluk (1=kucuk, 3=buyuk)
 FPS = 30                      # Pencere FPS
