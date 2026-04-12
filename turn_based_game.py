@@ -15,6 +15,10 @@
 
 import sys
 import os
+
+# overcooked_ai_py paketini bulmak için src/ dizinini ekle
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
+
 import pygame
 from pygame.locals import *
 
@@ -24,8 +28,6 @@ from overcooked_ai_py.mdp.actions import Action, Direction
 from overcooked_ai_py.planning.planners import MediumLevelActionManager, NO_COUNTERS_PARAMS
 from overcooked_ai_py.visualization.state_visualizer import StateVisualizer
 
-# BeliefAgent import: workspace root'tan
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from belief_agent_v2 import BeliefAgentV2 as BeliefAgent
 from order_display import render_orders
 
