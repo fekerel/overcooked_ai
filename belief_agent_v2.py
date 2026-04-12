@@ -221,8 +221,19 @@ class BeliefAgentV2(Agent):
         - initial_state verilmişse prev_state olarak kaydet
         """
         self.mdp = mdp
+
+        # Counter'ları da dahil eden parametreler
+        counter_locs = mdp.get_counter_locations()
+        mlam_params = {
+            "start_orientations": False,
+            "wait_allowed": False,
+            "counter_goals": counter_locs,
+            "counter_drop": counter_locs,
+            "counter_pickup": counter_locs,
+            "same_motion_goals": True,
+        }
         self._mlam = MediumLevelActionManager.from_pickle_or_compute(
-            mdp, NO_COUNTERS_PARAMS, force_compute=False,
+            mdp, mlam_params, force_compute=False,
         )
         self._mp = self._mlam.joint_motion_planner.motion_planner
 
@@ -253,6 +264,24 @@ class BeliefAgentV2(Agent):
         # Başlangıç state'i verilmişse kaydet
         if initial_state is not None:
             self.prev_state = initial_state
+
+        # ── Dispenser erişim haritası ──
+        # Her oyuncunun hangi dispenser türlerine erişebildiğini hesapla
+        # Layout sabit olduğu için bir kere hesaplamak yeterli
+        self._player_can_reach = {0: set(), 1: set()}
+        dispenser_map = {
+            "onion": mdp.get_onion_dispenser_locations(),
+            "tomato": mdp.get_tomato_dispenser_locations(),
+        }
+        if initial_state is not None:
+            for pidx in (0, 1):
+                start = initial_state.players[pidx].pos_and_or
+                for ing, locs in dispenser_map.items():
+                    if not locs:
+                        continue
+                    cost = self._mp.min_cost_to_feature(start, locs)
+                    if cost < float("inf"):
+                        self._player_can_reach[pidx].add(ing)
 
     def action(self, state):
         """
@@ -359,7 +388,8 @@ class BeliefAgentV2(Agent):
 
         # Adım 1: Tüm potlar dolu → tabak al
         if all_full:
-            return self._go(state, self.mdp.get_dish_dispenser_locations())
+            result = self._go(state, self.mdp.get_dish_dispenser_locations())
+            return result if result is not None else (Action.STAY, {})
 
         # Adım 2-3: Eksik pot var
         if best_pot is not None:
@@ -382,19 +412,40 @@ class BeliefAgentV2(Agent):
             if target_ing is None:
                 return Action.STAY, {}
 
+            # İnsan bu ingredient'a erişemiyor mu?
+            # Erişemiyorsa AI kesinlikle bu ingredient'ı almalı (intent'e bakmadan)
+            human_idx = 1 - self.agent_index
+            human_can = self._player_can_reach.get(human_idx, set())
+            if target_ing not in human_can:
+                # İnsan bu ingredient'ı taşıyamaz → AI alsın
+                if target_ing == "onion" and onion_disps:
+                    result = self._go(state, onion_disps)
+                    if result is not None:
+                        return result
+                elif target_ing == "tomato" and tomato_disps:
+                    result = self._go(state, tomato_disps)
+                    if result is not None:
+                        return result
+
             # Adım 3: Pot 2 ingredient'liyse insanın intent'ine bak
             if best_count == 2:
                 ingredient_intents = {"GET_ONION", "GET_TOMATO",
                                       "PUT_ONION_IN_POT", "PUT_TOMATO_IN_POT"}
                 if top_intent in ingredient_intents:
                     # İnsan ingredient taşıyacak → AI tabak alsın
-                    return self._go(state, self.mdp.get_dish_dispenser_locations())
+                    result = self._go(state, self.mdp.get_dish_dispenser_locations())
+                    if result is not None:
+                        return result
 
             # Ingredient al
-            if target_ing == "onion":
-                return self._go(state, self.mdp.get_onion_dispenser_locations())
-            elif target_ing == "tomato":
-                return self._go(state, self.mdp.get_tomato_dispenser_locations())
+            if target_ing == "onion" and onion_disps:
+                result = self._go(state, onion_disps)
+                if result is not None:
+                    return result
+            elif target_ing == "tomato" and tomato_disps:
+                result = self._go(state, tomato_disps)
+                if result is not None:
+                    return result
 
         return Action.STAY, {}
 
@@ -581,7 +632,7 @@ class BeliefAgentV2(Agent):
     def _go(self, state, target_positions):
         """
         MLAM ile hedef pozisyonlardan en yakınına git.
-        Döner: (aksiyon, {}) veya (STAY, {}) erişilemezse.
+        Döner: (aksiyon, {}) veya None erişilemezse.
 
         target_positions: terrain lokasyonları [(x,y), ...]
         MotionPlanner bu lokasyonlara ulaşmak için gerekli ilk adımı verir.
@@ -597,12 +648,14 @@ class BeliefAgentV2(Agent):
             goals.extend(mg)
 
         if not goals:
-            return Action.STAY, {}
+            return None
 
         # En yakın goal'a olan plan
         min_cost = float("inf")
-        best_action = Action.STAY
+        best_action = None
         for g in goals:
+            if not self._mp.is_valid_motion_start_goal_pair(start, g):
+                continue
             try:
                 action_plan, _, cost = self._mp.get_plan(start, g)
                 if cost < min_cost:
@@ -612,6 +665,8 @@ class BeliefAgentV2(Agent):
                 print(f"[_go] get_plan failed: start={start}, goal={g}, error={e}")
                 continue
 
+        if best_action is None:
+            return None
         return best_action, {}
 
     # ─────────────────────────────────
@@ -671,6 +726,20 @@ class BeliefAgentV2(Agent):
                 counters.append(pos)
         return counters
 
+    def _midpoint_counter(self, state):
+        """
+        İki oyuncunun orta noktasına en yakın boş counter'ları döner.
+        Manhattan distance ile sıralı, en yakından en uzağa.
+        """
+        counters = self._nearest_counter(state)
+        if not counters:
+            return []
+        p0 = state.players[0].position
+        p1 = state.players[1].position
+        mid = ((p0[0] + p1[0]) / 2.0, (p0[1] + p1[1]) / 2.0)
+        counters.sort(key=lambda c: abs(c[0] - mid[0]) + abs(c[1] - mid[1]))
+        return counters
+
     # ─────────────────────────────────
     #  Katman 1: Fiziksel Güvenlik Kuralları
     # ─────────────────────────────────
@@ -687,6 +756,7 @@ class BeliefAgentV2(Agent):
         4. Elde dish + hiçbiri yok → counter'a bırak
         5. Elde ingredient + uyumlu pot → pot'a git (koy)
         6. Elde ingredient + uyumlu pot yok → counter'a bırak
+        _go None dönebilir (erişilemez) → sonraki kurala/fallback'e geç
         """
         ai = state.players[self.agent_index]
         held = ai.held_object
@@ -698,29 +768,49 @@ class BeliefAgentV2(Agent):
 
         # Kural 1: Elde soup → serving'e git
         if obj_name == "soup":
-            return self._go(state, self.mdp.get_serving_locations())
+            result = self._go(state, self.mdp.get_serving_locations())
+            if result is not None:
+                return result
+            # Serving'e erişilemiyorsa counter'a bırak
+            counters = self._midpoint_counter(state)
+            if counters:
+                result = self._go(state, counters)
+                if result is not None:
+                    return result
+            return Action.STAY, {}
 
         # Kural 2-4: Elde dish
         if obj_name == "dish":
             ready = self._ready_pots(state)
             if ready:
-                return self._go(state, ready)           # Kural 2
+                result = self._go(state, ready)
+                if result is not None:
+                    return result                       # Kural 2
             cooking = self._cooking_pots(state)
             if cooking:
-                return self._go(state, cooking)         # Kural 3
-            counters = self._nearest_counter(state)
+                result = self._go(state, cooking)
+                if result is not None:
+                    return result                       # Kural 3
+            counters = self._midpoint_counter(state)
             if counters:
-                return self._go(state, counters)        # Kural 4
+                result = self._go(state, counters)
+                if result is not None:
+                    return result                       # Kural 4
             return Action.STAY, {}
 
         # Kural 5-6: Elde ingredient (onion/tomato)
         if obj_name in ("onion", "tomato"):
             compat = self._compatible_pots(state, obj_name)
             if compat:
-                return self._go(state, compat)          # Kural 5
-            counters = self._nearest_counter(state)
+                result = self._go(state, compat)
+                if result is not None:
+                    return result                       # Kural 5
+            # Pot'a erişilemiyorsa veya uyumlu pot yoksa → counter'a bırak
+            counters = self._midpoint_counter(state)
             if counters:
-                return self._go(state, counters)        # Kural 6
+                result = self._go(state, counters)
+                if result is not None:
+                    return result                       # Kural 6
             return Action.STAY, {}
 
         return None  # bilinmeyen nesne, Katman 2'ye düş
