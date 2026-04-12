@@ -96,23 +96,48 @@ def get_player_action(events):
 
 def main():
     print(f"Harita yukleniyor: {LAYOUT}")
-    # Layout'a göre geçerli siparişleri belirle
+
+    # Layout config'ini oku
+    from overcooked_ai_py.utils import read_layout_dict
+    _layout_conf = read_layout_dict(LAYOUT)
+    _grid_str = _layout_conf["grid"]
+    _grid = [row.strip() for row in _grid_str.split("\n")]
+
+    # Grid'den dispenser varlığını tespit et (geçici MDP oluşturmaya gerek yok)
+    _has_onion = "O" in _grid_str
+    _has_tomato = "T" in _grid_str
+
+    # Sipariş listesi: varolan ingredient'lere göre
     layout_orders = []
-    # Geçici MDP oluştur (ingredient varlığını kontrol etmek için)
-    _tmp_mdp = OvercookedGridworld.from_layout_name(LAYOUT)
-    if _tmp_mdp.get_onion_dispenser_locations():
+    if _has_onion:
         layout_orders.append({"ingredients": ("onion", "onion", "onion")})
-    if _tmp_mdp.get_tomato_dispenser_locations():
+    if _has_tomato:
         layout_orders.append({"ingredients": ("tomato", "tomato", "tomato")})
     if not layout_orders:
-        # Hiçbiri yoksa fallback (olmaması lazım ama güvenlik)
         layout_orders.append({"ingredients": ("onion", "onion", "onion")})
 
-    mdp = OvercookedGridworld.from_layout_name(
-        LAYOUT,
-        start_all_orders=layout_orders,
-        recipe_values=[20] * len(layout_orders),
-        recipe_times=[20] * len(layout_orders),
+    # base_layout_params hazırla — grid ve çakışan parametreleri temizle
+    _base = {k: v for k, v in _layout_conf.items() if k != "grid"}
+    for _k in ("onion_value", "tomato_value", "onion_time", "tomato_time",
+               "delivery_reward", "cook_time",
+               "start_all_orders", "start_bonus_orders",
+               "recipe_values", "recipe_times"):
+        _base.pop(_k, None)
+    _base["layout_name"] = LAYOUT
+
+    # start_state varsa deserialize et
+    if "start_state" in _base:
+        from overcooked_ai_py.mdp.overcooked_mdp import OvercookedState
+        _base["start_state"] = OvercookedState.from_dict(_base["start_state"])
+
+    mdp = OvercookedGridworld.from_grid(
+        _grid,
+        _base,
+        {
+            "start_all_orders": layout_orders,
+            "recipe_values": [20] * len(layout_orders),
+            "recipe_times": [20] * len(layout_orders),
+        },
     )
     env = OvercookedEnv.from_mdp(mdp, horizon=HORIZON, info_level=0)
 
