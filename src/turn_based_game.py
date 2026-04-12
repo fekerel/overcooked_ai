@@ -31,7 +31,7 @@ from order_display import render_orders
 
 
 # --- AYARLAR ---
-LAYOUT = "inverse_marshmallow_experiment"       # Harita ismi
+LAYOUT = "forced_coordination_tomato"       # Harita ismi
 HORIZON = 400                 # Maksimum adim sayisi
 WINDOW_SCALE = 3              # Pencere buyukluk (1=kucuk, 3=buyuk)
 FPS = 30                      # Pencere FPS
@@ -106,6 +106,8 @@ def main():
     mdp = OvercookedGridworld.from_layout_name(
         LAYOUT,
         start_all_orders=layout_orders,
+        recipe_values=[20] * len(layout_orders),
+        recipe_times=[20] * len(layout_orders),
     )
     env = OvercookedEnv.from_mdp(mdp, horizon=HORIZON, info_level=0)
 

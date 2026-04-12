@@ -8,6 +8,7 @@ import numpy as np
 import random
 from overcooked_ai_py.agents.agent import Agent
 from overcooked_ai_py.mdp.actions import Action, Direction
+from overcooked_ai_py.mdp.overcooked_mdp import Recipe
 from overcooked_ai_py.planning.planners import (
     MediumLevelActionManager,
     NO_COUNTERS_PARAMS,
@@ -291,7 +292,7 @@ class BeliefAgentV2(Agent):
         ai = state.players[self.agent_index]
         if (self._last_action in Direction.ALL_DIRECTIONS
                 and self.prev_state is not None
-                and self.prev_state.players[self.agent_index].position == ai.position):
+                and self.prev_state.players[self.agent_index].pos_and_or == ai.pos_and_or):
             walkable = set(self.mdp.get_valid_player_positions())
             valid = []
             for d in Direction.ALL_DIRECTIONS:
@@ -306,12 +307,95 @@ class BeliefAgentV2(Agent):
         """
         Karar koordinatörü:
         - Katman 1 (fiziksel kurallar) → sonuç varsa döndür
-        - Katman 2 (belief-tabanlı) → şimdilik STAY placeholder
+        - Katman 2 (belief-tabanlı) → eli boşken ne almalıyım?
         """
         result = self._physical_rules(state)
         if result is not None:
             return result
-        # Katman 2 henüz yok — STAY döndür
+        return self._belief_decision(state)
+
+    # ─────────────────────────────────
+    #  Katman 2: Belief-Tabanlı Karar
+    # ─────────────────────────────────
+
+    def _belief_decision(self, state):
+        """
+        Eli boş AI: posterior'a ve pot durumuna bakarak ne alacağını seç.
+
+        1. Tüm potlar dolu (cooking/ready) → tabak al
+        2. Eksik pot var, ingredient < 2  → pot'a uyumlu ingredient al
+        3. Eksik pot var, ingredient == 2 → insanın intent'ine bak:
+           - İnsan ingredient taşıyorsa → tabak al
+           - Değilse → ingredient al
+        Fallback: STAY
+        """
+        MAX = Recipe.MAX_NUM_INGREDIENTS
+
+        # Pot analizi: en dolu eksik pot'u bul
+        best_pot = None
+        best_count = -1
+        best_ingredient = None
+        all_full = True
+
+        for pot_loc in self.mdp.get_pot_locations():
+            if not state.has_object(pot_loc):
+                # Boş pot
+                all_full = False
+                if best_count < 0:
+                    best_pot = pot_loc
+                    best_count = 0
+                    best_ingredient = None
+                continue
+
+            obj = state.get_object(pot_loc)
+            if hasattr(obj, "ingredients"):
+                count = len(obj.ingredients)
+                if count < MAX:
+                    all_full = False
+                    if count > best_count:
+                        best_pot = pot_loc
+                        best_count = count
+                        best_ingredient = obj.ingredients[0] if obj.ingredients else None
+
+        # Adım 1: Tüm potlar dolu → tabak al
+        if all_full:
+            return self._go(state, self.mdp.get_dish_dispenser_locations())
+
+        # Adım 2-3: Eksik pot var
+        if best_pot is not None:
+            onion_disps = self.mdp.get_onion_dispenser_locations()
+            tomato_disps = self.mdp.get_tomato_dispenser_locations()
+            top_intent = INTENTS[np.argmax(self._posterior)]
+
+            # Hangi ingredient? Pot'ta varsa aynısını, yoksa intent'e göre
+            target_ing = best_ingredient
+            if target_ing is None:
+                # Boş pot → insanın intent'ine bakarak ingredient belirle
+                if top_intent in ("GET_ONION", "PUT_ONION_IN_POT") and onion_disps:
+                    target_ing = "onion"
+                elif top_intent in ("GET_TOMATO", "PUT_TOMATO_IN_POT") and tomato_disps:
+                    target_ing = "tomato"
+                else:
+                    # Belirsiz → layout'un ilk available ingredient'ı
+                    target_ing = "onion" if onion_disps else "tomato" if tomato_disps else None
+
+            if target_ing is None:
+                return Action.STAY, {}
+
+            # Adım 3: Pot 2 ingredient'liyse insanın intent'ine bak
+            if best_count == 2:
+                ingredient_intents = {"GET_ONION", "GET_TOMATO",
+                                      "PUT_ONION_IN_POT", "PUT_TOMATO_IN_POT"}
+                if top_intent in ingredient_intents:
+                    # İnsan ingredient taşıyacak → AI tabak alsın
+                    return self._go(state, self.mdp.get_dish_dispenser_locations())
+
+            # Ingredient al
+            if target_ing == "onion":
+                return self._go(state, self.mdp.get_onion_dispenser_locations())
+            elif target_ing == "tomato":
+                return self._go(state, self.mdp.get_tomato_dispenser_locations())
+
         return Action.STAY, {}
 
     # ─────────────────────────────────
@@ -524,7 +608,8 @@ class BeliefAgentV2(Agent):
                 if cost < min_cost:
                     min_cost = cost
                     best_action = action_plan[0] if action_plan else Action.INTERACT
-            except Exception:
+            except Exception as e:
+                print(f"[_go] get_plan failed: start={start}, goal={g}, error={e}")
                 continue
 
         return best_action, {}
@@ -539,12 +624,15 @@ class BeliefAgentV2(Agent):
         - Boş pot'lar (hiç ingredient yok)
         - Aynı ingredient'i içeren ve henüz dolu olmayan pot'lar
         """
-        MAX = self.mdp.num_items_for_soup  # genelde 3
+        MAX = Recipe.MAX_NUM_INGREDIENTS  # genelde 3
         result = []
         for pot_loc in self.mdp.get_pot_locations():
-            obj = state.get_object(pot_loc)
-            if obj is None or not hasattr(obj, "ingredients"):
+            if not state.has_object(pot_loc):
                 result.append(pot_loc)  # boş pot
+                continue
+            obj = state.get_object(pot_loc)
+            if not hasattr(obj, "ingredients"):
+                result.append(pot_loc)  # boş pot (obje var ama ingredient yok)
             elif len(obj.ingredients) < MAX:
                 # Pot'ta ne var?
                 if all(ing == ingredient for ing in obj.ingredients):
@@ -563,7 +651,7 @@ class BeliefAgentV2(Agent):
 
     def _cooking_pots(self, state):
         """Pişmekte olan (henüz ready olmayan ama dolu) pot lokasyonları."""
-        MAX = self.mdp.num_items_for_soup
+        MAX = Recipe.MAX_NUM_INGREDIENTS
         result = []
         for pot_loc in self.mdp.get_pot_locations():
             if state.has_object(pot_loc):
